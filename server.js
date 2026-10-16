@@ -12,16 +12,28 @@ const PORT = process.env.PORT || 3000;
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
+// ---------- accounts ----------
 const USERS = {
   GF091007: { password: 'piyush0907', name: 'Fancy 💗' },
   BF030609: { password: 'fancy0306',  name: 'Piyush 💙' }
 };
 const partnerOf = (u) => (u === 'GF091007' ? 'BF030609' : 'GF091007');
 
-const sessions = new Map();
-const online   = new Map();
-const messages = [];
+// ---------- state ----------
+const sessions = new Map();      // token -> username
+const online   = new Map();      // username -> socket.id
+const messages = [];             // all live messages (until seenAt+1h)
 
+// every seen message is deleted 1 hour after being seen
+function scheduleDelete(id, at) {
+  const delay = Math.max(0, at - Date.now());
+  setTimeout(() => {
+    const i = messages.findIndex((m) => m.id === id);
+    if (i !== -1) messages.splice(i, 1);
+  }, delay);
+}
+
+// ---------- express ----------
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
@@ -54,6 +66,7 @@ app.post('/api/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- uploads ----------
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
   filename: (_req, file, cb) => {
@@ -76,11 +89,30 @@ app.post('/api/upload', (req, res, next) => {
   });
 });
 
-app.use('/uploads', express.static(UPLOAD_DIR));
+// ---------- download route (forces browser download) ----------
+app.get('/api/download/:file', (req, res) => {
+  const file = path.basename(req.params.file);
+  const full = path.join(UPLOAD_DIR, file);
+  if (!full.startsWith(UPLOAD_DIR) || !fs.existsSync(full)) {
+    return res.status(404).send('Not found');
+  }
+  const niceName = req.query.name ? String(req.query.name) : file;
+  res.setHeader('Content-Disposition', 'attachment; filename="' + encodeURIComponent(niceName) + '"');
+  res.setHeader('Content-Type', 'application/octet-stream');
+  fs.createReadStream(full).pipe(res);
+});
+
+app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '1h' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ---------- socket.io ----------
 const server = http.createServer(app);
-const io = new Server(server, { maxHttpBufferSize: 1e7 });
+const io = new Server(server, {
+  maxHttpBufferSize: 1e7,
+  pingInterval: 15000,
+  pingTimeout: 20000,
+  transports: ['websocket', 'polling']
+});
 
 io.use((socket, next) => {
   const token = socket.handshake.auth && socket.handshake.auth.token;
@@ -100,11 +132,13 @@ io.on('connection', (socket) => {
   const partner = partnerOf(me);
   online.set(me, socket.id);
 
-  socket.emit('messages:pending', messages.filter((m) => m.to === me));
+  // send pending (not yet seen) messages instantly
+  socket.emit('messages:pending', messages.filter((m) => m.to === me && !m.seenAt));
 
   emitTo(partner, 'presence', { user: me, online: true });
   socket.emit('presence', { user: partner, online: online.has(partner) });
 
+  // ---------- chat ----------
   socket.on('message:send', (payload, ack) => {
     const msg = {
       id: crypto.randomUUID(),
@@ -116,25 +150,33 @@ io.on('connection', (socket) => {
       name: payload.name || '',
       mime: payload.mime || '',
       size: payload.size || 0,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      seenAt: 0
     };
     messages.push(msg);
     emitTo(partner, 'message:new', msg);
     if (typeof ack === 'function') ack({ ok: true, message: msg });
   });
 
+  // receiver says: I've seen these ids → set seenAt, tell sender, schedule delete
   socket.on('message:seen', ({ ids }) => {
     if (!Array.isArray(ids)) return;
+    const now = Date.now();
     const seen = [];
     for (const id of ids) {
-      const i = messages.findIndex((m) => m.id === id && m.to === me);
-      if (i !== -1) { messages.splice(i, 1); seen.push(id); }
+      const m = messages.find((x) => x.id === id && x.to === me && !x.seenAt);
+      if (m) {
+        m.seenAt = now;
+        seen.push(id);
+        scheduleDelete(id, now + 60 * 60 * 1000); // 1 hour
+      }
     }
     if (seen.length) emitTo(partner, 'message:seen', { ids: seen, by: me });
   });
 
   socket.on('typing', (isTyping) => emitTo(partner, 'typing', { from: me, typing: !!isTyping }));
 
+  // ---------- calls ----------
   socket.on('call:invite', (data) => {
     if (!online.has(partner)) return socket.emit('call:unavailable');
     emitTo(partner, 'call:incoming', { from: me, kind: data.kind, sdp: data.sdp });
