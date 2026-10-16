@@ -106,16 +106,14 @@ body{
 #messages::-webkit-scrollbar{width:6px}
 #messages::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:99px}
 
-.msg{display:flex;max-width:84%;animation:msgIn .35s cubic-bezier(.2,.9,.3,1.15) both}
-@keyframes msgIn{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}
+.msg{display:flex;max-width:84%;animation:msgIn .28s cubic-bezier(.2,.9,.3,1.15) both}
+@keyframes msgIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
 .msg.mine{align-self:flex-end}
 .msg.theirs{align-self:flex-start}
 .bubble{position:relative;padding:10px 14px;border-radius:20px;font-size:15px;line-height:1.45;word-break:break-word}
 .msg.mine .bubble{background:linear-gradient(135deg,#ff4d8d,#d926a9 60%,#a855f7);border-bottom-right-radius:6px;box-shadow:0 8px 24px rgba(255,77,141,.32)}
 .msg.theirs .bubble{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.14);border-bottom-left-radius:6px;box-shadow:0 8px 22px rgba(0,0,0,.25)}
 .meta{display:flex;align-items:center;gap:5px;justify-content:flex-end;margin-top:4px;font-size:10.5px;opacity:.72}
-.msg.burn{animation:burnOut .42s ease forwards}
-@keyframes burnOut{0%{opacity:1;filter:blur(0)}100%{opacity:0;transform:translateY(-10px) scale(.88);filter:blur(7px)}}
 
 .bubble.media{padding:6px;overflow:hidden}
 .thumb{position:relative;border-radius:15px;overflow:hidden;max-width:250px;cursor:pointer;background:#000;line-height:0}
@@ -263,7 +261,7 @@ body{
 </section>
 
 <div id="viewer" class="hidden">
-  <div class="viewer-note">Tap outside or close — it will disappear 💫</div>
+  <div class="viewer-note">Tap outside or close 💫</div>
   <div id="viewer-stage"></div>
   <div id="viewer-bar">
     <a id="viewer-download" href="#" download>⬇ Download</a>
@@ -305,12 +303,12 @@ body{
 (function () {
   'use strict';
 
-  const LOGOUT_ON_HIDE = true;
-  const SEEN_BURN_MS   = 12000;
-  const TEXT_SEEN_MS   = 1200;
+  const LOGOUT_ON_HIDE = true;    // log out when tab is hidden
+  const SEEN_LIFETIME  = 60 * 60 * 1000; // 1 hour after seen → disappear
+  const TEXT_SEEN_MS   = 800;
   const MAX_FILE_MB    = 60;
 
-  const $  = (s) => document.querySelector(s);
+  const $ = (s) => document.querySelector(s);
 
   let toastTimer;
   function toast(msg) {
@@ -318,16 +316,15 @@ body{
     t.textContent = msg;
     t.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
   }
+  const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-  const fmtTime = (ts) =>
-    new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
+  // floating hearts
   (function hearts() {
     const box = $('#hearts');
     const glyphs = ['💖', '💕', '💗', '❤️', '💘', '🌸', '✨'];
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 18; i++) {
       const h = document.createElement('div');
       h.className = 'heart';
       h.textContent = glyphs[Math.floor(Math.random() * glyphs.length)];
@@ -354,6 +351,7 @@ body{
     suppressTimer = setTimeout(() => { suppressLogout = false; }, ms);
   }
 
+  // ---------------- login ----------------
   $('#login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const username = $('#username').value.trim();
@@ -397,8 +395,16 @@ body{
     } catch (_) { sessionStorage.removeItem('love_session'); }
   })();
 
+  // ---------------- socket ----------------
   function connectSocket() {
-    const socket = io({ auth: { token: state.token } });
+    const socket = io({
+      auth: { token: state.token },
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionDelay: 300,
+      reconnectionDelayMax: 2000,
+      reconnectionAttempts: Infinity
+    });
     state.socket = socket;
 
     socket.on('connect_error', () => { hardLogout(false); toast('Session expired'); });
@@ -412,12 +418,18 @@ body{
       if (document.visibilityState === 'visible') buzz();
     });
 
+    // sender learns the receiver saw → sender keeps it visible for 1h too
     socket.on('message:seen', ({ ids }) => {
-      (ids || []).forEach((id) => removeMessage(id));
+      (ids || []).forEach((id) => {
+        const el = document.querySelector('.msg[data-id="' + id + '"]');
+        if (!el) return;
+        if (el.dataset.seen === '1') return;
+        el.dataset.seen = '1';
+        setTimeout(() => removeMessage(id), SEEN_LIFETIME);
+      });
     });
 
     socket.on('presence', ({ online }) => setPresence(!!online));
-
     socket.on('typing', ({ typing }) => {
       $('#typing-indicator').classList.toggle('hidden', !typing);
     });
@@ -437,9 +449,10 @@ body{
   }
 
   function buzz() {
-    if (navigator.vibrate) { try { navigator.vibrate(35); } catch (_) {} }
+    if (navigator.vibrate) { try { navigator.vibrate(25); } catch (_) {} }
   }
 
+  // ---------------- messages ----------------
   const messagesEl = $('#messages');
 
   function nearBottom() {
@@ -459,6 +472,7 @@ body{
     el.className = 'msg ' + (mine ? 'mine' : 'theirs');
     el.dataset.id = msg.id;
     el.dataset.mine = mine ? '1' : '0';
+    el.dataset.seen = msg.seenAt ? '1' : '0';
 
     if (msg.type === 'text') {
       const bubble = document.createElement('div');
@@ -479,14 +493,20 @@ body{
     messagesEl.appendChild(el);
     scrollToBottom();
 
-    if (!mine) {
-      if (msg.type === 'text') {
-        setTimeout(() => {
-          if (document.body.contains(el) && document.visibilityState === 'visible') {
-            markSeen([msg.id]);
-          }
-        }, TEXT_SEEN_MS);
-      }
+    // if this message was already marked seen on the server (1h countdown already started),
+    // schedule local removal based on the remaining time.
+    if (msg.seenAt) {
+      const remaining = Math.max(0, msg.seenAt + SEEN_LIFETIME - Date.now());
+      setTimeout(() => removeMessage(msg.id), remaining);
+    }
+
+    // receiver: text messages → seen almost immediately
+    if (!mine && msg.type === 'text') {
+      setTimeout(() => {
+        if (document.body.contains(el) && document.visibilityState === 'visible') {
+          markSeen([msg.id]);
+        }
+      }, TEXT_SEEN_MS);
     }
   }
 
@@ -538,32 +558,51 @@ body{
 
   function removeMessage(id) {
     const el = document.querySelector('.msg[data-id="' + id + '"]');
-    if (!el || el.dataset.burning === '1') return;
-    el.dataset.burning = '1';
-    el.classList.add('burn');
-    setTimeout(() => el.remove(), 440);
+    if (!el) return;
+    el.style.transition = 'opacity .3s ease, transform .3s ease';
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(-6px) scale(.98)';
+    setTimeout(() => el.remove(), 320);
   }
 
+  // mark messages as seen (called by receiver)
   function markSeen(ids) {
     if (!ids || !ids.length || !state.socket) return;
     state.socket.emit('message:seen', { ids });
     ids.forEach((id) => {
       const el = document.querySelector('.msg[data-id="' + id + '"]');
-      if (el && el.dataset.burning !== '1') {
-        el.dataset.burning = '1';
-        setTimeout(() => el.remove(), SEEN_BURN_MS);
-      }
+      if (!el) return;
+      if (el.dataset.seen === '1') return;
+      el.dataset.seen = '1';
+      setTimeout(() => removeMessage(id), SEEN_LIFETIME);
     });
   }
 
+  // ---------------- sending ----------------
   function sendText() {
     const input = $('#msg-input');
     const text = input.value.trim();
     if (!text || !state.socket) return;
     input.value = '';
     stopTyping();
+
+    // optimistic render: show instantly, then confirm id
+    const tempId = 'opt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    const fake = {
+      id: tempId,
+      from: state.me,
+      to: state.partner,
+      type: 'text',
+      text,
+      createdAt: Date.now(),
+      seenAt: 0
+    };
+    addMessage(fake);
+
     state.socket.emit('message:send', { type: 'text', text }, (res) => {
-      if (res && res.ok) addMessage(res.message);
+      if (!res || !res.ok) return;
+      const el = document.querySelector('.msg[data-id="' + tempId + '"]');
+      if (el) el.dataset.id = res.message.id;
     });
   }
 
@@ -572,21 +611,21 @@ body{
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
   });
 
+  // ---------------- typing ----------------
   let typingTimer = null;
   let typingSent = false;
-
   function stopTyping() {
     if (typingSent && state.socket) { state.socket.emit('typing', false); typingSent = false; }
     clearTimeout(typingTimer);
   }
-
   $('#msg-input').addEventListener('input', () => {
     if (!state.socket) return;
     if (!typingSent) { state.socket.emit('typing', true); typingSent = true; }
     clearTimeout(typingTimer);
-    typingTimer = setTimeout(stopTyping, 1600);
+    typingTimer = setTimeout(stopTyping, 1500);
   });
 
+  // ---------------- upload ----------------
   $('#btn-attach').addEventListener('click', () => {
     suppressLogoutFor(120000);
     $('#file-input').click();
@@ -602,8 +641,8 @@ body{
     if (!isVideo && !isImage) { toast('Only photos and videos 💕'); return; }
     if (file.size > MAX_FILE_MB * 1024 * 1024) { toast('Too big — max ' + MAX_FILE_MB + ' MB'); return; }
 
-    const tempId = 'tmp-' + Date.now();
     const objUrl = URL.createObjectURL(file);
+    const tempId = 'tmp-' + Date.now();
     addTempBubble(tempId, isVideo, objUrl);
 
     try {
@@ -616,7 +655,6 @@ body{
       });
       if (!r.ok) throw new Error('upload');
       const up = await r.json();
-
       removeTempBubble(tempId, objUrl);
 
       state.socket.emit('message:send', {
@@ -636,6 +674,7 @@ body{
     const el = document.createElement('div');
     el.className = 'msg mine';
     el.dataset.id = id;
+    el.dataset.mine = '1';
     el.innerHTML =
       '<div class="bubble media">' +
         '<div class="thumb">' +
@@ -647,13 +686,13 @@ body{
     messagesEl.appendChild(el);
     scrollToBottom(true);
   }
-
   function removeTempBubble(id, url) {
     const el = document.querySelector('.msg[data-id="' + id + '"]');
     if (el) el.remove();
     try { URL.revokeObjectURL(url); } catch (_) {}
   }
 
+  // ---------------- viewer with download ----------------
   let viewerMsgId = null;
   let viewerMine = false;
 
@@ -678,9 +717,12 @@ body{
       stage.appendChild(i);
     }
 
+    // build the download link via server-side download route
     const dl = $('#viewer-download');
-    dl.href = msg.url;
-    dl.download = msg.name || ('love-' + msg.id);
+    const fileName = msg.url.split('/').pop();
+    const nice = msg.name || fileName;
+    dl.href = '/api/download/' + encodeURIComponent(fileName) + '?name=' + encodeURIComponent(nice);
+    dl.setAttribute('download', nice);
 
     $('#viewer').classList.remove('hidden');
   }
@@ -693,6 +735,7 @@ body{
     $('#viewer').classList.add('hidden');
     $('#viewer-stage').innerHTML = '';
 
+    // receiver saw media → mark seen now (starts 1h countdown)
     if (wasId && !wasMine) markSeen([wasId]);
   }
 
@@ -704,10 +747,29 @@ body{
     if (e.key === 'Escape' && !$('#viewer').classList.contains('hidden')) closeViewer();
   });
 
+  // ---------------- webrtc ----------------
+  // Public STUN + TURN. TURN is what fixes calls that fail on mobile/NAT.
   const RTC_CONFIG = {
     iceServers: [
-      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
-    ]
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+      // free public TURN relays (no signup) — helps when STUN fails
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
+    ],
+    iceCandidatePoolSize: 4
   };
 
   let pc = null;
@@ -718,11 +780,15 @@ body{
   let iceQueue = [];
   let muted = false;
   let camOff = false;
+  let pendingOffer = null;
 
   async function getMedia(kind) {
     const constraints = kind === 'video'
-      ? { audio: true, video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } }
-      : { audio: true, video: false };
+      ? {
+          audio: { echoCancellation: true, noiseSuppression: true },
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }
+        }
+      : { audio: { echoCancellation: true, noiseSuppression: true }, video: false };
     return navigator.mediaDevices.getUserMedia(constraints);
   }
 
@@ -751,6 +817,14 @@ body{
       if (!pc) return;
       if (pc.connectionState === 'connected') setCallStatus('Connected 💞');
       if (pc.connectionState === 'failed') { toast('Connection lost'); endCall(true); }
+      if (pc.connectionState === 'disconnected') setCallStatus('Reconnecting…');
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (!pc) return;
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        setCallStatus('Connected 💞');
+      }
     };
   }
 
@@ -778,6 +852,8 @@ body{
     $('#localVideo').srcObject = localStream;
     $('#btn-mute').classList.remove('off');
     $('#btn-cam').classList.remove('off');
+    $('#btn-mute').textContent = '🎤';
+    $('#btn-cam').textContent = '📷';
     muted = false; camOff = false;
   }
 
@@ -863,7 +939,7 @@ body{
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
       await flushIce();
-      setCallStatus('Connected 💞');
+      setCallStatus('Connecting…');
     } catch (_) {
       toast('Call failed');
       endCall(true);
@@ -895,6 +971,7 @@ body{
       pc.onicecandidate = null;
       pc.ontrack = null;
       pc.onconnectionstatechange = null;
+      pc.oniceconnectionstatechange = null;
       try { pc.close(); } catch (_) {}
       pc = null;
     }
@@ -904,6 +981,7 @@ body{
     iceQueue = [];
     currentCall = null;
     incomingCall = null;
+    pendingOffer = null;
     muted = false; camOff = false;
 
     $('#call-overlay').classList.add('hidden');
@@ -914,6 +992,7 @@ body{
     $('#btn-cam').textContent = '📷';
   }
 
+  // ---------------- logout ----------------
   function hardLogout(notifyServer) {
     const token = state.token;
 
@@ -933,14 +1012,10 @@ body{
     }
 
     sessionStorage.removeItem('love_session');
-
     if (state.socket) { try { state.socket.disconnect(); } catch (_) {} state.socket = null; }
     endCall(false);
 
-    state.token = null;
-    state.me = null;
-    state.partner = null;
-    state.partnerName = null;
+    state.token = null; state.me = null; state.partner = null; state.partnerName = null;
     state.online = false;
 
     messagesEl.innerHTML = '';
@@ -964,7 +1039,6 @@ body{
       hardLogout(true);
     }
   });
-
   window.addEventListener('pagehide', () => {
     if (state.token) hardLogout(true);
   });
